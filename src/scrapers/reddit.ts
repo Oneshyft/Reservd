@@ -15,24 +15,43 @@ interface RedditPost {
 
 export class RedditScraper {
   private userAgent = 'SuiteSpotter/1.0';
-  private rateLimitDelay = 1500; // 1.5 seconds between requests to be polite
+  private rateLimitDelay = 1500;
+  private baseUrl = 'https://www.reddit.com';
+  private useOldReddit = false;
 
   private async searchSubreddit(subreddit: string, query: string, limit = 25): Promise<RedditPost[]> {
-    const url = `https://www.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(query)}&sort=new&limit=${limit}&restrict_sr=on`;
+    const base = this.useOldReddit ? 'https://old.reddit.com' : this.baseUrl;
+    const url = `${base}/r/${subreddit}/search.json?q=${encodeURIComponent(query)}&sort=new&limit=${limit}&restrict_sr=on`;
+
+    console.log(`[Reddit] GET ${url}`);
 
     const response = await fetch(url, {
       headers: { 'User-Agent': this.userAgent },
     });
 
+    console.log(`[Reddit] r/${subreddit} q="${query}" → ${response.status} ${response.statusText}`);
+
+    // If blocked or rate-limited, try old.reddit.com as fallback
+    if ((response.status === 429 || response.status === 403) && !this.useOldReddit) {
+      console.log(`[Reddit] Got ${response.status} from www.reddit.com — switching to old.reddit.com`);
+      this.useOldReddit = true;
+      return this.searchSubreddit(subreddit, query, limit);
+    }
+
     if (response.status === 429) {
-      throw new Error(`Rate limited on r/${subreddit}`);
+      throw new Error(`Rate limited on r/${subreddit} (even old.reddit.com)`);
     }
     if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      console.log(`[Reddit] Error body (first 500 chars): ${body.slice(0, 500)}`);
       throw new Error(`Failed to fetch r/${subreddit}: ${response.status}`);
     }
 
     const data = await response.json();
-    return (data.data?.children || []).map((child: { data: RedditPost }) => child.data);
+    const posts: RedditPost[] = (data.data?.children || []).map((child: { data: RedditPost }) => child.data);
+    console.log(`[Reddit] r/${subreddit} q="${query}" → ${posts.length} posts returned`);
+
+    return posts;
   }
 
   private async delay(ms: number): Promise<void> {
@@ -43,41 +62,60 @@ export class RedditScraper {
     const errors: string[] = [];
     let newLeads = 0;
 
-    // Get active phrases for the tier
     const phrases = await prisma.triggerPhrase.findMany({
       where: { isActive: true, tier: tier === 'HIGH' ? 'HIGH' : tier === 'MEDIUM' ? { in: ['HIGH', 'MEDIUM'] } : undefined },
     });
 
     const subreddits = tier === 'HIGH' ? PRIMARY_SUBREDDITS : SECONDARY_SUBREDDITS;
 
-    // Track seen post IDs this scan to avoid processing duplicates across phrase searches
+    console.log(`[Reddit] Starting scan tier=${tier}`);
+    console.log(`[Reddit] Subreddits (${subreddits.length}): ${subreddits.join(', ')}`);
+    console.log(`[Reddit] Phrases (${phrases.length}): ${phrases.map(p => p.text).join(' | ')}`);
+    console.log(`[Reddit] Total requests to make: ${subreddits.length * phrases.length}`);
+
     const seenPostIds = new Set<string>();
+    let totalPostsFetched = 0;
+    let skippedDuplicate = 0;
+    let skippedNoMatch = 0;
+    let skippedExisting = 0;
+    let requestCount = 0;
 
     for (const subreddit of subreddits) {
       for (const phrase of phrases) {
         try {
+          requestCount++;
+          console.log(`[Reddit] Request ${requestCount}/${subreddits.length * phrases.length}: r/${subreddit} q="${phrase.text}"`);
           await this.delay(this.rateLimitDelay);
           const posts = await this.searchSubreddit(subreddit, phrase.text);
+          totalPostsFetched += posts.length;
 
           for (const post of posts) {
-            // Skip if already seen this scan
-            if (seenPostIds.has(post.id)) continue;
+            if (seenPostIds.has(post.id)) {
+              skippedDuplicate++;
+              continue;
+            }
             seenPostIds.add(post.id);
 
             const fullText = `${post.title} ${post.selftext}`.toLowerCase();
 
-            // Collect all matching phrases for this post (not just the one we searched for)
             const matchedPhrases = phrases
               .filter(p => fullText.includes(p.text.toLowerCase()))
               .map(p => p.text);
 
-            if (matchedPhrases.length === 0) continue;
+            if (matchedPhrases.length === 0) {
+              skippedNoMatch++;
+              console.log(`[Reddit] SKIP no phrase match: "${post.title.slice(0, 80)}"`);
+              continue;
+            }
 
-            // Deduplicate against existing leads in the database
             const existing = await prisma.lead.findFirst({
               where: { url: `https://reddit.com${post.permalink}` },
             });
-            if (existing) continue;
+            if (existing) {
+              skippedExisting++;
+              console.log(`[Reddit] SKIP already in DB: "${post.title.slice(0, 80)}"`);
+              continue;
+            }
 
             const content = post.selftext
               ? `${post.title}\n\n${post.selftext}`
@@ -100,11 +138,27 @@ export class RedditScraper {
               },
             });
             newLeads++;
+            console.log(`[Reddit] NEW LEAD (score=${score}): "${post.title.slice(0, 80)}" matched=[${matchedPhrases.join(', ')}]`);
           }
         } catch (error) {
-          errors.push(`r/${subreddit} "${phrase.text}": ${(error as Error).message}`);
+          const msg = `r/${subreddit} "${phrase.text}": ${(error as Error).message}`;
+          console.log(`[Reddit] ERROR: ${msg}`);
+          errors.push(msg);
         }
       }
+    }
+
+    console.log(`[Reddit] === Scan Complete ===`);
+    console.log(`[Reddit] Requests made: ${requestCount}`);
+    console.log(`[Reddit] Total posts fetched: ${totalPostsFetched}`);
+    console.log(`[Reddit] Unique posts seen: ${seenPostIds.size}`);
+    console.log(`[Reddit] Skipped (duplicate in scan): ${skippedDuplicate}`);
+    console.log(`[Reddit] Skipped (no phrase match): ${skippedNoMatch}`);
+    console.log(`[Reddit] Skipped (already in DB): ${skippedExisting}`);
+    console.log(`[Reddit] New leads created: ${newLeads}`);
+    console.log(`[Reddit] Errors: ${errors.length}`);
+    if (this.useOldReddit) {
+      console.log(`[Reddit] NOTE: Fell back to old.reddit.com due to 429/403`);
     }
 
     return { newLeads, errors };

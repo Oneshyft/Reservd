@@ -7,14 +7,24 @@ export async function POST(request: NextRequest) {
   const body = await request.json();
   const { tier } = body; // HIGH, MEDIUM, LOW
 
+  console.log(`[Scan] Starting scan with tier=${tier || 'HIGH'}`);
+  const startTime = Date.now();
+
   const results: { platform: string; newLeads: number; errors: string[] }[] = [];
 
   // Reddit scanning
   try {
+    const redditStart = Date.now();
+    console.log(`[Scan] Starting Reddit scan...`);
     const reddit = new RedditScraper();
     const redditResult = await reddit.scan(tier || 'HIGH');
+    console.log(`[Scan] Reddit scan complete in ${((Date.now() - redditStart) / 1000).toFixed(1)}s — ${redditResult.newLeads} new leads, ${redditResult.errors.length} errors`);
+    if (redditResult.errors.length > 0) {
+      console.log(`[Scan] Reddit errors: ${redditResult.errors.join(' | ')}`);
+    }
     results.push({ platform: 'Reddit', ...redditResult });
   } catch (error) {
+    console.log(`[Scan] Reddit scan FAILED: ${(error as Error).message}`);
     results.push({ platform: 'Reddit', newLeads: 0, errors: [(error as Error).message] });
   }
 
@@ -31,7 +41,6 @@ export async function POST(request: NextRequest) {
 
   const totalNew = results.reduce((sum, r) => sum + r.newLeads, 0);
 
-  // Check for high-score leads and create notification data
   const hotLeads = await prisma.lead.findMany({
     where: {
       score: { gte: 8 },
@@ -41,6 +50,9 @@ export async function POST(request: NextRequest) {
     orderBy: { score: 'desc' },
     take: 5,
   });
+
+  const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+  console.log(`[Scan] Complete in ${elapsed}s — ${totalNew} total new leads`);
 
   return NextResponse.json({ results, totalNew, hotLeads });
 }
