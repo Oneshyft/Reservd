@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Lead {
+  id              String   @id @default(cuid())
+  platform        String   // REDDIT, FACEBOOK, TWITTER
+  source          String   // subreddit name, group name, etc.
+  author          String
+  content         String
+  url             String
+  postTimestamp   DateTime
+  matchedPhrases  String   // JSON array of matched phrase texts
+  score           Int      @default(0)
+  status          String   @default("NEW") // NEW, REVIEWING, COMMENTED, DMED, CONVERTED, NOT_A_FIT, CLOSED_LOST
+  notes           String   @default("")
+  team            String   @default("") // LIONS, RED_WINGS, BOTH, UNKNOWN
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  outreachEvents OutreachEvent[]
+}
+
+model TriggerPhrase {
+  id       String  @id @default(cuid())
+  text     String
+  tier     String  // HIGH, MEDIUM, LOW
+  isRegex  Boolean @default(false)
+  isActive Boolean @default(true)
+}
+
+model OutreachTemplate {
+  id          String @id @default(cuid())
+  name        String
+  triggerTags String // JSON array of trigger tag strings
+  bodyText    String
+  usageCount  Int    @default(0)
+
+  outreachEvents OutreachEvent[]
+}
+
+model OutreachEvent {
+  id         String   @id @default(cuid())
+  leadId     String
+  templateId String?
+  timestamp  DateTime @default(now())
+  method     String   // COMMENT, DM
+  notes      String   @default("")
+
+  lead     Lead              @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  template OutreachTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+}
+
+model Settings {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
+}
