@@ -46,26 +46,15 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
 
-## Reddit API Credential Setup
+## Reddit Integration
 
-1. Go to [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps)
-2. Click **"create another app..."** at the bottom
-3. Fill in:
-   - **name**: SuiteSpotter
-   - **type**: Select **script**
-   - **description**: Social listening tool
-   - **redirect uri**: `http://localhost:3000`
-4. Click **"create app"**
-5. Copy the credentials:
-   - **Client ID**: The string under "personal use script" (e.g., `abc123def456`)
-   - **Client Secret**: The "secret" value
-6. Add to your `.env`:
-   ```
-   REDDIT_CLIENT_ID=abc123def456
-   REDDIT_CLIENT_SECRET=your_secret_here
-   REDDIT_USERNAME=your_reddit_username
-   REDDIT_PASSWORD=your_reddit_password
-   ```
+Reddit scanning uses the **public JSON API** — no OAuth credentials or app registration needed. The scraper searches each subreddit using:
+
+```
+https://www.reddit.com/r/SUBREDDIT/search.json?q=KEYWORD&sort=new&limit=25
+```
+
+Requests include a `User-Agent: SuiteSpotter/1.0` header and a 1.5-second delay between requests to stay within rate limits.
 
 ## Features
 
@@ -100,7 +89,7 @@ Open [http://localhost:3000](http://localhost:3000) to view the dashboard.
 - Enters the same pipeline as automated leads
 
 ### Platform-Specific Features
-- **Reddit**: Automated scanning via official API (snoowrap)
+- **Reddit**: Automated scanning via public JSON API (no credentials needed)
 - **Facebook**: Manual logging + copyable search terms for Facebook Groups
 - **Twitter/X**: Live monitoring if API token configured, otherwise manual search strings provided
 

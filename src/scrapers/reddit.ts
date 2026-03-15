@@ -14,58 +14,15 @@ interface RedditPost {
 }
 
 export class RedditScraper {
-  private clientId: string;
-  private clientSecret: string;
-  private username: string;
-  private password: string;
-  private userAgent: string;
-  private accessToken: string | null = null;
-  private rateLimitDelay = 1000; // 1 second between requests
+  private userAgent = 'SuiteSpotter/1.0';
+  private rateLimitDelay = 1500; // 1.5 seconds between requests to be polite
 
-  constructor() {
-    this.clientId = process.env.REDDIT_CLIENT_ID || '';
-    this.clientSecret = process.env.REDDIT_CLIENT_SECRET || '';
-    this.username = process.env.REDDIT_USERNAME || '';
-    this.password = process.env.REDDIT_PASSWORD || '';
-    this.userAgent = process.env.REDDIT_USER_AGENT || 'SuiteSpotter/1.0';
-  }
+  private async searchSubreddit(subreddit: string, query: string, limit = 25): Promise<RedditPost[]> {
+    const url = `https://www.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(query)}&sort=new&limit=${limit}&restrict_sr=on`;
 
-  private async authenticate(): Promise<void> {
-    if (!this.clientId || !this.clientSecret) {
-      throw new Error('Reddit API credentials not configured. Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env');
-    }
-
-    const auth = Buffer.from(`${this.clientId}:${this.clientSecret}`).toString('base64');
-    const response = await fetch('https://www.reddit.com/api/v1/access_token', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'User-Agent': this.userAgent,
-      },
-      body: `grant_type=password&username=${encodeURIComponent(this.username)}&password=${encodeURIComponent(this.password)}`,
+    const response = await fetch(url, {
+      headers: { 'User-Agent': this.userAgent },
     });
-
-    if (!response.ok) {
-      throw new Error(`Reddit auth failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    this.accessToken = data.access_token;
-  }
-
-  private async fetchSubreddit(subreddit: string, limit = 25): Promise<RedditPost[]> {
-    if (!this.accessToken) await this.authenticate();
-
-    const response = await fetch(
-      `https://oauth.reddit.com/r/${subreddit}/new.json?limit=${limit}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'User-Agent': this.userAgent,
-        },
-      }
-    );
 
     if (response.status === 429) {
       throw new Error(`Rate limited on r/${subreddit}`);
@@ -75,7 +32,7 @@ export class RedditScraper {
     }
 
     const data = await response.json();
-    return data.data.children.map((child: { data: RedditPost }) => child.data);
+    return (data.data?.children || []).map((child: { data: RedditPost }) => child.data);
   }
 
   private async delay(ms: number): Promise<void> {
@@ -93,51 +50,60 @@ export class RedditScraper {
 
     const subreddits = tier === 'HIGH' ? PRIMARY_SUBREDDITS : SECONDARY_SUBREDDITS;
 
+    // Track seen post IDs this scan to avoid processing duplicates across phrase searches
+    const seenPostIds = new Set<string>();
+
     for (const subreddit of subreddits) {
-      try {
-        await this.delay(this.rateLimitDelay);
-        const posts = await this.fetchSubreddit(subreddit);
+      for (const phrase of phrases) {
+        try {
+          await this.delay(this.rateLimitDelay);
+          const posts = await this.searchSubreddit(subreddit, phrase.text);
 
-        for (const post of posts) {
-          const fullText = `${post.title} ${post.selftext}`.toLowerCase();
+          for (const post of posts) {
+            // Skip if already seen this scan
+            if (seenPostIds.has(post.id)) continue;
+            seenPostIds.add(post.id);
 
-          // Check for phrase matches
-          const matchedPhrases = phrases
-            .filter(p => fullText.includes(p.text.toLowerCase()))
-            .map(p => p.text);
+            const fullText = `${post.title} ${post.selftext}`.toLowerCase();
 
-          if (matchedPhrases.length === 0) continue;
+            // Collect all matching phrases for this post (not just the one we searched for)
+            const matchedPhrases = phrases
+              .filter(p => fullText.includes(p.text.toLowerCase()))
+              .map(p => p.text);
 
-          // Check if we already have this post
-          const existing = await prisma.lead.findFirst({
-            where: { url: `https://reddit.com${post.permalink}` },
-          });
-          if (existing) continue;
+            if (matchedPhrases.length === 0) continue;
 
-          const content = post.selftext
-            ? `${post.title}\n\n${post.selftext}`
-            : post.title;
-          const score = scoreLead(content, `r/${post.subreddit}`, matchedPhrases, post.num_comments);
-          const team = detectTeam(content);
+            // Deduplicate against existing leads in the database
+            const existing = await prisma.lead.findFirst({
+              where: { url: `https://reddit.com${post.permalink}` },
+            });
+            if (existing) continue;
 
-          await prisma.lead.create({
-            data: {
-              platform: 'REDDIT',
-              source: `r/${post.subreddit}`,
-              author: post.author,
-              content,
-              url: `https://reddit.com${post.permalink}`,
-              postTimestamp: new Date(post.created_utc * 1000),
-              matchedPhrases: JSON.stringify(matchedPhrases),
-              score,
-              status: 'NEW',
-              team,
-            },
-          });
-          newLeads++;
+            const content = post.selftext
+              ? `${post.title}\n\n${post.selftext}`
+              : post.title;
+            const score = scoreLead(content, `r/${post.subreddit}`, matchedPhrases, post.num_comments);
+            const team = detectTeam(content);
+
+            await prisma.lead.create({
+              data: {
+                platform: 'REDDIT',
+                source: `r/${post.subreddit}`,
+                author: post.author,
+                content,
+                url: `https://reddit.com${post.permalink}`,
+                postTimestamp: new Date(post.created_utc * 1000),
+                matchedPhrases: JSON.stringify(matchedPhrases),
+                score,
+                status: 'NEW',
+                team,
+              },
+            });
+            newLeads++;
+          }
+        } catch (error) {
+          errors.push(`r/${subreddit} "${phrase.text}": ${(error as Error).message}`);
         }
-      } catch (error) {
-        errors.push(`r/${subreddit}: ${(error as Error).message}`);
       }
     }
 
