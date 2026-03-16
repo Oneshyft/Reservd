@@ -18,6 +18,13 @@ export class RedditScraper {
   private rateLimitDelay = 1500;
   private baseUrl = 'https://www.reddit.com';
   private useOldReddit = false;
+  private daysLookback: number;
+  private cutoffTimestamp: number;
+
+  constructor() {
+    this.daysLookback = parseInt(process.env.DAYS_LOOKBACK || '180', 10);
+    this.cutoffTimestamp = Date.now() / 1000 - this.daysLookback * 86400;
+  }
 
   private async searchSubreddit(subreddit: string, query: string, limit = 25): Promise<RedditPost[]> {
     const base = this.useOldReddit ? 'https://old.reddit.com' : this.baseUrl;
@@ -72,12 +79,14 @@ export class RedditScraper {
     console.log(`[Reddit] Subreddits (${subreddits.length}): ${subreddits.join(', ')}`);
     console.log(`[Reddit] Phrases (${phrases.length}): ${phrases.map(p => p.text).join(' | ')}`);
     console.log(`[Reddit] Total requests to make: ${subreddits.length * phrases.length}`);
+    console.log(`[Reddit] Lookback: ${this.daysLookback} days (cutoff: ${new Date(this.cutoffTimestamp * 1000).toISOString()})`);
 
     const seenPostIds = new Set<string>();
     let totalPostsFetched = 0;
     let skippedDuplicate = 0;
     let skippedNoMatch = 0;
     let skippedExisting = 0;
+    let skippedTooOld = 0;
     let requestCount = 0;
 
     for (const subreddit of subreddits) {
@@ -95,6 +104,12 @@ export class RedditScraper {
               continue;
             }
             seenPostIds.add(post.id);
+
+            if (post.created_utc < this.cutoffTimestamp) {
+              skippedTooOld++;
+              console.log(`[Reddit] SKIP too old (${new Date(post.created_utc * 1000).toISOString().slice(0, 10)}): "${post.title.slice(0, 80)}"`);
+              continue;
+            }
 
             const fullText = `${post.title} ${post.selftext}`.toLowerCase();
 
@@ -155,6 +170,7 @@ export class RedditScraper {
     console.log(`[Reddit] Skipped (duplicate in scan): ${skippedDuplicate}`);
     console.log(`[Reddit] Skipped (no phrase match): ${skippedNoMatch}`);
     console.log(`[Reddit] Skipped (already in DB): ${skippedExisting}`);
+    console.log(`[Reddit] Skipped (older than ${this.daysLookback} days): ${skippedTooOld}`);
     console.log(`[Reddit] New leads created: ${newLeads}`);
     console.log(`[Reddit] Errors: ${errors.length}`);
     if (this.useOldReddit) {
